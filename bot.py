@@ -1,7 +1,7 @@
 import logging
-import json
 import os
-import httpx
+import psycopg2
+from psycopg2.extras import DictCursor
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -12,7 +12,10 @@ from telegram.ext import (
     ContextTypes,
     ConversationHandler,
 )
-from telegram.request import HTTPXRequest
+from dotenv import load_dotenv
+
+# Загрузка переменных окружения
+load_dotenv()
 
 # Настройка логгирования
 logging.basicConfig(
@@ -26,13 +29,6 @@ WAITING_FOR_MESSAGE = 1
 
 # ID группы психологов
 PSYCHOLOGIST_GROUP_ID = -4855005984
-
-# Пути к файлам данных
-USER_MESSAGES_FILE = "user_messages.json"
-USER_DATA_FILE = "user_data.json"
-
-# Загрузка токена бота
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '7830341197:AAGo6uWmeg5xumOOLa9CKxzjTLsB06Yb8KU')
 
 # Текстовые константы
 TEXTS = {
@@ -67,21 +63,162 @@ TEXTS = {
     "psychologist_response": "Вы получили ответ от психолога:\n\n{}"
 }
 
-# Загрузка и сохранение данных
-def load_data(filename):
-    try:
-        with open(filename, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+class Database:
+    def __init__(self):
+        self.conn = None
+        
+    def connect(self):
+        """Устанавливает соединение с базой данных"""
+        try:
+            self.conn = psycopg2.connect(os.getenv('DATABASE_URL'))
+            logger.info("Успешное подключение к базе данных")
+        except Exception as e:
+            logger.error(f"Ошибка подключения к базе данных: {e}")
+            raise
 
-def save_data(data, filename):
-    with open(filename, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    def init_db(self):
+        """Инициализирует таблицы в базе данных"""
+        try:
+            with self.conn.cursor() as cur:
+                # Таблица пользователей
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id BIGINT PRIMARY KEY,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_answer TEXT
+                )
+                """)
+                
+                # Таблица сообщений
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id SERIAL PRIMARY KEY,
+                    message_id TEXT NOT NULL,
+                    user_id BIGINT REFERENCES users(user_id),
+                    user_message_id TEXT,
+                    message_type TEXT NOT NULL,
+                    text TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    answered BOOLEAN DEFAULT FALSE,
+                    response TEXT
+                )
+                """)
+                
+                # Индексы для ускорения поиска
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)")
+                
+                self.conn.commit()
+                logger.info("Таблицы успешно инициализированы")
+        except Exception as e:
+            logger.error(f"Ошибка инициализации базы данных: {e}")
+            self.conn.rollback()
+            raise
 
-# Инициализация данных
-user_messages = load_data(USER_MESSAGES_FILE)
-user_data = load_data(USER_DATA_FILE)
+    def save_user(self, user_id):
+        """Сохраняет пользователя в базу данных"""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO users (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING",
+                    (user_id,)
+                )
+                self.conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка сохранения пользователя: {e}")
+            self.conn.rollback()
+            raise
+
+    def save_message(self, message_data):
+        """Сохраняет сообщение в базу данных"""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO messages 
+                    (message_id, user_id, user_message_id, message_type, text)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (
+                        message_data['message_id'],
+                        message_data['user_id'],
+                        message_data['user_message_id'],
+                        message_data['message_type'],
+                        message_data.get('text')
+                    )
+                )
+                self.conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка сохранения сообщения: {e}")
+            self.conn.rollback()
+            raise
+
+    def get_pending_responses(self, user_id):
+        """Получает непрочитанные ответы для пользователя"""
+        try:
+            with self.conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT message_id, response 
+                    FROM messages 
+                    WHERE user_id = %s AND response IS NOT NULL AND answered = FALSE
+                    ORDER BY created_at
+                    """,
+                    (user_id,)
+                )
+                responses = cur.fetchall()
+                
+                if responses:
+                    # Помечаем ответы как прочитанные
+                    message_ids = [r['message_id'] for r in responses]
+                    cur.execute(
+                        """
+                        UPDATE messages 
+                        SET answered = TRUE 
+                        WHERE message_id = ANY(%s)
+                        """,
+                        (message_ids,)
+                    )
+                    self.conn.commit()
+                
+                return responses
+        except Exception as e:
+            logger.error(f"Ошибка получения ответов: {e}")
+            self.conn.rollback()
+            return []
+
+    def save_response(self, message_id, response_text):
+        """Сохраняет ответ психолога"""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE messages 
+                    SET response = %s, answered = FALSE 
+                    WHERE message_id = %s 
+                    RETURNING user_id
+                    """,
+                    (response_text, message_id)
+                )
+                user_id = cur.fetchone()[0]
+                
+                # Обновляем last_answer в таблице users
+                cur.execute(
+                    "UPDATE users SET last_answer = %s WHERE user_id = %s",
+                    (response_text, user_id)
+                )
+                
+                self.conn.commit()
+                return user_id
+        except Exception as e:
+            logger.error(f"Ошибка сохранения ответа: {e}")
+            self.conn.rollback()
+            return None
+
+# Инициализация базы данных
+db = Database()
+db.connect()
+db.init_db()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -123,29 +260,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif query.data == "check_response":
         user_id = query.from_user.id
-        responses = [k for k, v in user_messages.items() if str(v.get("user_id")) == str(user_id) and "response" in v]
+        responses = db.get_pending_responses(user_id)
         
         if not responses:
             await query.edit_message_text(TEXTS["no_responses"], reply_markup=None)
-            await start(update, context)
         else:
-            for message_id in responses:
-                response_data = user_messages[message_id]
+            for response in responses:
                 await context.bot.send_message(
                     chat_id=user_id,
-                    text=TEXTS["psychologist_response"].format(response_data['response']),
+                    text=TEXTS["psychologist_response"].format(response['response']),
                 )
-                # Помечаем ответ как прочитанный
-                user_messages[message_id]["answered"] = True
-                save_data(user_messages, USER_MESSAGES_FILE)
-            await start(update, context)
+        
+        await start(update, context)
     
     elif query.data == "back_to_main":
         await start(update, context)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
-    chat_id = update.message.chat_id
     
     try:
         if update.message.video_note:
@@ -154,34 +286,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 video_note=update.message.video_note.file_id,
             )
             message_type = "video_note"
+            text = None
         elif update.message.text:
             sent_message = await context.bot.send_message(
                 chat_id=PSYCHOLOGIST_GROUP_ID,
                 text=f"Анонимное сообщение:\n\n{update.message.text}",
             )
             message_type = "text"
+            text = update.message.text
         else:
             await update.message.reply_text("Пожалуйста, отправьте только текст или видео-кружок.")
             return WAITING_FOR_MESSAGE
         
-        # Сохраняем информацию о сообщении
-        user_messages[str(sent_message.message_id)] = {
-            "user_id": user.id,
-            "user_message_id": update.message.message_id,
-            "message_type": message_type,
-            "answered": False
-        }
-        save_data(user_messages, USER_MESSAGES_FILE)
+        # Сохраняем пользователя и сообщение
+        db.save_user(user.id)
         
-        # Сохраняем информацию о пользователе
-        if str(user.id) not in user_data:
-            user_data[str(user.id)] = {"messages": {}, "last_answer": None}
-        
-        user_data[str(user.id)]["messages"][str(update.message.message_id)] = {
-            "text": update.message.text or "video_note",
-            "answered": False
+        message_data = {
+            'message_id': str(sent_message.message_id),
+            'user_id': user.id,
+            'user_message_id': str(update.message.message_id),
+            'message_type': message_type,
+            'text': text
         }
-        save_data(user_data, USER_DATA_FILE)
+        db.save_message(message_data)
         
         await update.message.reply_text(TEXTS["message_sent"])
         
@@ -193,38 +320,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def handle_psychologist_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.chat.id != PSYCHOLOGIST_GROUP_ID:
-        return
-    
-    if not update.message.reply_to_message:
+    if update.message.chat.id != PSYCHOLOGIST_GROUP_ID or not update.message.reply_to_message:
         return
     
     replied_message_id = str(update.message.reply_to_message.message_id)
-    
-    if replied_message_id not in user_messages:
-        return
-    
-    user_data = user_messages[replied_message_id]
-    user_id = user_data["user_id"]
-    
-    # Получаем текст или подпись медиа-файла
     response_text = update.message.text or update.message.caption or "Психолог отправил медиа-сообщение"
     
-    # Обновляем данные
-    user_messages[replied_message_id]["response"] = response_text
-    user_messages[replied_message_id]["answered"] = True
-    save_data(user_messages, USER_MESSAGES_FILE)
+    user_id = db.save_response(replied_message_id, response_text)
+    if not user_id:
+        return
     
-    # Обновляем user_data
-    if str(user_id) in user_data:
-        for msg_id, msg_data in user_data[str(user_id)]["messages"].items():
-            if msg_data.get("user_message_id") == replied_message_id:
-                msg_data["answered"] = True
-                user_data[str(user_id)]["last_answer"] = response_text
-                break
-        save_data(user_data, USER_DATA_FILE)
-    
-    # Отправляем ответ пользователю
     try:
         await context.bot.send_message(
             chat_id=user_id,
@@ -238,15 +343,15 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 def main():
-    if not BOT_TOKEN:
-        logger.error("Не указан токен бота!")
+    if not os.getenv('TELEGRAM_BOT_TOKEN'):
+        logger.error("Не указан токен бота! Установите переменную окружения TELEGRAM_BOT_TOKEN")
         return
     
-    # Создаем Application с кастомным HTTP-клиентом
-    application = Application.builder() \
-        .token(BOT_TOKEN) \
-        .request(HTTPXRequest(http_version="1.1")) \
-        .build()
+    if not os.getenv('DATABASE_URL'):
+        logger.error("Не указана строка подключения к БД! Установите переменную окружения DATABASE_URL")
+        return
+    
+    application = Application.builder().token(os.getenv('TELEGRAM_BOT_TOKEN')).build()
     
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start), CallbackQueryHandler(button_handler)],

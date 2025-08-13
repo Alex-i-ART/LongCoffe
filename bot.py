@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 WAITING_FOR_MESSAGE = 1
 
 # ID группы психологов
-PSYCHOLOGIST_GROUP_ID = -4855005984
+PSYCHOLOGIST_GROUP_ID = -1002773179737
 
 # Текстовые константы
 TEXTS = {

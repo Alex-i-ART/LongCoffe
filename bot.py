@@ -270,23 +270,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    if query.data == "about_community":
-        keyboard = [[InlineKeyboardButton("Назад", callback_data="back_to_main")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(TEXTS["about_community"], reply_markup=reply_markup, parse_mode="Markdown")
-    
-    elif query.data == "about_psychologist":
-        keyboard = [[InlineKeyboardButton("Назад", callback_data="back_to_main")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(TEXTS["about_psychologist"], reply_markup=reply_markup, parse_mode="Markdown")
-    
-    elif query.data == "write_problem":
-        keyboard = [[InlineKeyboardButton("Отмена", callback_data="back_to_main")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(TEXTS["write_problem"], reply_markup=reply_markup, parse_mode="Markdown")
-        return WAITING_FOR_MESSAGE
-    
-    elif query.data == "check_response":
+    if query.data == "check_response":
         user_id = query.from_user.id
         responses = db.get_pending_responses(user_id)
         
@@ -295,10 +279,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             for response in responses:
                 if response['response_type'] == 'video_note':
+                    # Сначала отправляем видео-кружок
                     await context.bot.send_video_note(
                         chat_id=user_id,
-                        video_note=response['response'],
-                        caption=TEXTS["psychologist_video_response"]
+                        video_note=response['response']
+                    )
+                    # Затем отправляем текстовое пояснение
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=TEXTS["psychologist_video_response"]
                     )
                 else:
                     await context.bot.send_message(
@@ -381,27 +370,31 @@ async def handle_psychologist_response(update: Update, context: ContextTypes.DEF
             update.message.video_note.file_id,
             response_type="video_note"
         )
+        if user_id:
+            try:
+                # Отправляем видео-кружок
+                await context.bot.send_video_note(
+                    chat_id=user_id,
+                    video_note=update.message.video_note.file_id
+                )
+                # Отправляем текстовое пояснение
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=TEXTS["psychologist_video_response"]
+                )
+            except Exception as e:
+                logger.error(f"Не удалось отправить видео-ответ пользователю {user_id}: {e}")
     else:
         response_text = update.message.text or update.message.caption or "Психолог отправил медиа-сообщение"
         user_id = db.save_response(replied_message_id, response_text)
-    
-    if not user_id:
-        return
-    
-    try:
-        if update.message.video_note:
-            await context.bot.send_video_note(
-                chat_id=user_id,
-                video_note=update.message.video_note.file_id,
-                caption=TEXTS["psychologist_video_response"]
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=TEXTS["psychologist_response"].format(response_text),
-            )
-    except Exception as e:
-        logger.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
+        if user_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=TEXTS["psychologist_response"].format(response_text),
+                )
+            except Exception as e:
+                logger.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)

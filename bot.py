@@ -60,7 +60,8 @@ TEXTS = {
         "'Ответ психолога' в главном меню."
     ),
     "no_responses": "Пока нет ответов от психолога.",
-    "psychologist_response": "📩 Вы получили ответ от психолога:\n\n{}"
+    "psychologist_response": "📩 Вы получили ответ от психолога:\n\n{}",
+    "psychologist_video_response": "📹 Психолог отправил вам видео-ответ:"
 }
 
 class Database:
@@ -100,7 +101,8 @@ class Database:
                     text TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     answered BOOLEAN DEFAULT FALSE,
-                    response TEXT
+                    response TEXT,
+                    response_type TEXT
                 )
                 """)
                 
@@ -159,9 +161,9 @@ class Database:
             with self.conn.cursor(cursor_factory=DictCursor) as cur:
                 cur.execute(
                     """
-                    SELECT message_id, response 
+                    SELECT message_id, response, response_type 
                     FROM messages 
-                    WHERE user_id = %s AND response IS NOT NULL AND answered = FALSE
+                    WHERE user_id = %s AND (response IS NOT NULL OR response_type = 'video_note') AND answered = FALSE
                     ORDER BY created_at
                     """,
                     (user_id,)
@@ -187,18 +189,18 @@ class Database:
             self.conn.rollback()
             return []
 
-    def save_response(self, message_id, response_text):
+    def save_response(self, message_id, response_text, response_type=None):
         """Сохраняет ответ психолога"""
         try:
             with self.conn.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE messages 
-                    SET response = %s, answered = FALSE 
+                    SET response = %s, answered = FALSE, response_type = %s
                     WHERE message_id = %s 
                     RETURNING user_id
                     """,
-                    (response_text, message_id)
+                    (response_text, response_type, message_id)
                 )
                 user_id = cur.fetchone()[0]
                 
@@ -266,10 +268,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(TEXTS["no_responses"])
         else:
             for response in responses:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=TEXTS["psychologist_response"].format(response['response']),
-                )
+                if response['response_type'] == 'video_note':
+                    await context.bot.send_video_note(
+                        chat_id=user_id,
+                        video_note=response['response'],
+                        caption=TEXTS["psychologist_video_response"]
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=TEXTS["psychologist_response"].format(response['response']),
+                    )
         
         # Возвращаем пользователя в текущее меню без дублирования
         keyboard = [
@@ -321,8 +330,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         db.save_message(message_data)
         
-        await update.message.reply_text(TEXTS["message_sent"])
-        # Не возвращаем пользователя в главное меню
+        # Добавляем кнопку "В меню" после отправки сообщения
+        keyboard = [[InlineKeyboardButton("В меню", callback_data="back_to_main")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(TEXTS["message_sent"], reply_markup=reply_markup)
         
     except Exception as e:
         logger.error(f"Ошибка при обработке сообщения: {e}")
@@ -336,17 +347,33 @@ async def handle_psychologist_response(update: Update, context: ContextTypes.DEF
         return
     
     replied_message_id = str(update.message.reply_to_message.message_id)
-    response_text = update.message.text or update.message.caption or "Психолог отправил медиа-сообщение"
     
-    user_id = db.save_response(replied_message_id, response_text)
+    if update.message.video_note:
+        # Сохраняем file_id видео-кружка
+        user_id = db.save_response(
+            replied_message_id, 
+            update.message.video_note.file_id,
+            response_type="video_note"
+        )
+    else:
+        response_text = update.message.text or update.message.caption or "Психолог отправил медиа-сообщение"
+        user_id = db.save_response(replied_message_id, response_text)
+    
     if not user_id:
         return
     
     try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=TEXTS["psychologist_response"].format(response_text),
-        )
+        if update.message.video_note:
+            await context.bot.send_video_note(
+                chat_id=user_id,
+                video_note=update.message.video_note.file_id,
+                caption=TEXTS["psychologist_video_response"]
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=TEXTS["psychologist_response"].format(response_text),
+            )
     except Exception as e:
         logger.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
 
@@ -378,7 +405,7 @@ def main():
     application.add_handler(conv_handler)
     application.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.Chat(PSYCHOLOGIST_GROUP_ID),
+            (filters.TEXT | filters.VIDEO_NOTE) & ~filters.COMMAND & filters.Chat(PSYCHOLOGIST_GROUP_ID),
             handle_psychologist_response
         )
     )

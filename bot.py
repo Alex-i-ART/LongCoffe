@@ -66,7 +66,7 @@ TEXTS = {
     ),
     "no_responses": "Пока нет ответов от психолога.",
     "psychologist_response": "📩 Вы получили ответ от психолога:\n\n{}",
-    "psychologist_video_response": "📹 Психолог отправил вам видео-ответ:"
+    "psychologist_video_response": "📹 Психолог отправил вам видео-ответ"
 }
 
 class Database:
@@ -95,7 +95,7 @@ class Database:
                 )
                 """)
                 
-                # Таблица сообщений (с добавлением response_type)
+                # Таблица сообщений
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
                     id SERIAL PRIMARY KEY,
@@ -124,10 +124,6 @@ class Database:
                     END IF;
                 END $$;
                 """)
-                
-                # Индексы для ускорения поиска
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)")
                 
                 self.conn.commit()
                 logger.info("Таблицы успешно инициализированы")
@@ -193,11 +189,7 @@ class Database:
                     # Помечаем ответы как прочитанные
                     message_ids = [r['message_id'] for r in responses]
                     cur.execute(
-                        """
-                        UPDATE messages 
-                        SET answered = TRUE 
-                        WHERE message_id = ANY(%s)
-                        """,
+                        "UPDATE messages SET answered = TRUE WHERE message_id = ANY(%s)",
                         (message_ids,)
                     )
                     self.conn.commit()
@@ -215,9 +207,7 @@ class Database:
                 cur.execute(
                     """
                     UPDATE messages 
-                    SET response = %s, 
-                        answered = FALSE, 
-                        response_type = %s
+                    SET response = %s, answered = FALSE, response_type = %s
                     WHERE message_id = %s 
                     RETURNING user_id
                     """,
@@ -225,17 +215,13 @@ class Database:
                 )
                 result = cur.fetchone()
                 if not result:
-                    logger.error(f"Сообщение с ID {message_id} не найдено")
                     return None
-                    
-                user_id = result[0]
                 
-                # Обновляем last_answer в таблице users
+                user_id = result[0]
                 cur.execute(
                     "UPDATE users SET last_answer = %s WHERE user_id = %s",
                     (response_text, user_id)
                 )
-                
                 self.conn.commit()
                 return user_id
         except Exception as e:
@@ -270,7 +256,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    if query.data == "check_response":
+    if query.data == "about_community":
+        keyboard = [[InlineKeyboardButton("Назад", callback_data="back_to_main")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(TEXTS["about_community"], reply_markup=reply_markup, parse_mode="Markdown")
+    
+    elif query.data == "about_psychologist":
+        keyboard = [[InlineKeyboardButton("Назад", callback_data="back_to_main")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(TEXTS["about_psychologist"], reply_markup=reply_markup, parse_mode="Markdown")
+    
+    elif query.data == "write_problem":
+        keyboard = [[InlineKeyboardButton("Отмена", callback_data="back_to_main")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(TEXTS["write_problem"], reply_markup=reply_markup, parse_mode="Markdown")
+        return WAITING_FOR_MESSAGE
+    
+    elif query.data == "check_response":
         user_id = query.from_user.id
         responses = db.get_pending_responses(user_id)
         
@@ -279,12 +281,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             for response in responses:
                 if response['response_type'] == 'video_note':
-                    # Сначала отправляем видео-кружок
                     await context.bot.send_video_note(
                         chat_id=user_id,
                         video_note=response['response']
                     )
-                    # Затем отправляем текстовое пояснение
                     await context.bot.send_message(
                         chat_id=user_id,
                         text=TEXTS["psychologist_video_response"]
@@ -295,7 +295,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         text=TEXTS["psychologist_response"].format(response['response']),
                     )
         
-        # Возвращаем пользователя в текущее меню без дублирования
         keyboard = [
             [
                 InlineKeyboardButton("О сообществе", callback_data="about_community"),
@@ -335,7 +334,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return WAITING_FOR_MESSAGE
         
         db.save_user(user.id)
-        
         message_data = {
             'message_id': str(sent_message.message_id),
             'user_id': user.id,
@@ -345,7 +343,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         db.save_message(message_data)
         
-        # Добавляем кнопку "В меню" после отправки сообщения
         keyboard = [[InlineKeyboardButton("В меню", callback_data="back_to_main")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(TEXTS["message_sent"], reply_markup=reply_markup)
@@ -364,7 +361,6 @@ async def handle_psychologist_response(update: Update, context: ContextTypes.DEF
     replied_message_id = str(update.message.reply_to_message.message_id)
     
     if update.message.video_note:
-        # Сохраняем file_id видео-кружка
         user_id = db.save_response(
             replied_message_id, 
             update.message.video_note.file_id,
@@ -372,12 +368,10 @@ async def handle_psychologist_response(update: Update, context: ContextTypes.DEF
         )
         if user_id:
             try:
-                # Отправляем видео-кружок
                 await context.bot.send_video_note(
                     chat_id=user_id,
                     video_note=update.message.video_note.file_id
                 )
-                # Отправляем текстовое пояснение
                 await context.bot.send_message(
                     chat_id=user_id,
                     text=TEXTS["psychologist_video_response"]
@@ -402,11 +396,11 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     if not os.getenv('TELEGRAM_BOT_TOKEN'):
-        logger.error("Не указан токен бота! Установите переменную окружения TELEGRAM_BOT_TOKEN")
+        logger.error("Не указан токен бота!")
         return
     
     if not os.getenv('DATABASE_URL'):
-        logger.error("Не указана строка подключения к БД! Установите переменную окружения DATABASE_URL")
+        logger.error("Не указана строка подключения к БД!")
         return
     
     try:
@@ -430,7 +424,6 @@ def main():
             )
         )
         
-        # Проверяем, есть ли переменная для webhook
         if os.getenv('WEBHOOK_URL'):
             PORT = int(os.environ.get('PORT', 5000))
             application.run_webhook(
@@ -442,9 +435,9 @@ def main():
             application.run_polling()
             
     except telegram.error.Conflict as e:
-        logger.error(f"ОШИБКА: Бот уже запущен в другом месте. {e}")
+        logger.error(f"Бот уже запущен: {e}")
     except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
+        logger.error(f"Ошибка запуска: {e}")
 
 if __name__ == "__main__":
     main()

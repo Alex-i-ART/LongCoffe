@@ -13,14 +13,19 @@ from telegram.ext import (
     ConversationHandler,
 )
 from dotenv import load_dotenv
+import telegram.error
 
 # Загрузка переменных окружения
 load_dotenv()
 
 # Настройка логгирования
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -90,7 +95,7 @@ class Database:
                 )
                 """)
                 
-                # Таблица сообщений
+                # Таблица сообщений (с добавлением response_type)
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
                     id SERIAL PRIMARY KEY,
@@ -104,6 +109,20 @@ class Database:
                     response TEXT,
                     response_type TEXT
                 )
+                """)
+                
+                # Добавляем колонку response_type, если она не существует
+                cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns 
+                        WHERE table_name='messages' AND column_name='response_type'
+                    ) THEN
+                        ALTER TABLE messages ADD COLUMN response_type TEXT;
+                    END IF;
+                END $$;
                 """)
                 
                 # Индексы для ускорения поиска
@@ -196,13 +215,20 @@ class Database:
                 cur.execute(
                     """
                     UPDATE messages 
-                    SET response = %s, answered = FALSE, response_type = %s
+                    SET response = %s, 
+                        answered = FALSE, 
+                        response_type = %s
                     WHERE message_id = %s 
                     RETURNING user_id
                     """,
                     (response_text, response_type, message_id)
                 )
-                user_id = cur.fetchone()[0]
+                result = cur.fetchone()
+                if not result:
+                    logger.error(f"Сообщение с ID {message_id} не найдено")
+                    return None
+                    
+                user_id = result[0]
                 
                 # Обновляем last_answer в таблице users
                 cur.execute(
@@ -390,28 +416,42 @@ def main():
         logger.error("Не указана строка подключения к БД! Установите переменную окружения DATABASE_URL")
         return
     
-    application = Application.builder().token(os.getenv('TELEGRAM_BOT_TOKEN')).build()
-    
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start), CallbackQueryHandler(button_handler)],
-        states={
-            WAITING_FOR_MESSAGE: [
-                MessageHandler(filters.TEXT | filters.VIDEO_NOTE, handle_message)
-            ],
-        },
-        fallbacks=[CallbackQueryHandler(cancel, pattern="back_to_main")],
-    )
-    
-    application.add_handler(conv_handler)
-    application.add_handler(
-        MessageHandler(
-            (filters.TEXT | filters.VIDEO_NOTE) & ~filters.COMMAND & filters.Chat(PSYCHOLOGIST_GROUP_ID),
-            handle_psychologist_response
+    try:
+        application = Application.builder().token(os.getenv('TELEGRAM_BOT_TOKEN')).build()
+        
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler("start", start), CallbackQueryHandler(button_handler)],
+            states={
+                WAITING_FOR_MESSAGE: [
+                    MessageHandler(filters.TEXT | filters.VIDEO_NOTE, handle_message)
+                ],
+            },
+            fallbacks=[CallbackQueryHandler(cancel, pattern="back_to_main")],
         )
-    )
-    
-    # Запуск бота
-    application.run_polling()
+        
+        application.add_handler(conv_handler)
+        application.add_handler(
+            MessageHandler(
+                (filters.TEXT | filters.VIDEO_NOTE) & ~filters.COMMAND & filters.Chat(PSYCHOLOGIST_GROUP_ID),
+                handle_psychologist_response
+            )
+        )
+        
+        # Проверяем, есть ли переменная для webhook
+        if os.getenv('WEBHOOK_URL'):
+            PORT = int(os.environ.get('PORT', 5000))
+            application.run_webhook(
+                listen="0.0.0.0",
+                port=PORT,
+                webhook_url=os.getenv('WEBHOOK_URL')
+            )
+        else:
+            application.run_polling()
+            
+    except telegram.error.Conflict as e:
+        logger.error(f"ОШИБКА: Бот уже запущен в другом месте. {e}")
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}")
 
 if __name__ == "__main__":
     main()

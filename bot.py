@@ -55,12 +55,12 @@ TEXTS = {
         "Психолог ответит вам в ближайшее время."
     ),
     "message_sent": (
-        "Ваше сообщение было отправлено психологу. "
+        "✅ Ваше сообщение было отправлено психологу. "
         "Ожидайте ответа. Вы можете проверить ответы, нажав кнопку "
         "'Ответ психолога' в главном меню."
     ),
     "no_responses": "Пока нет ответов от психолога.",
-    "psychologist_response": "Вы получили ответ от психолога:\n\n{}"
+    "psychologist_response": "📩 Вы получили ответ от психолога:\n\n{}"
 }
 
 class Database:
@@ -253,7 +253,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(TEXTS["about_psychologist"], reply_markup=reply_markup, parse_mode="Markdown")
     
     elif query.data == "write_problem":
-        keyboard = [[InlineKeyboardButton("Назад", callback_data="back_to_main")]]
+        keyboard = [[InlineKeyboardButton("Отмена", callback_data="back_to_main")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(TEXTS["write_problem"], reply_markup=reply_markup, parse_mode="Markdown")
         return WAITING_FOR_MESSAGE
@@ -263,7 +263,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         responses = db.get_pending_responses(user_id)
         
         if not responses:
-            await query.edit_message_text(TEXTS["no_responses"], reply_markup=None)
+            await query.edit_message_text(TEXTS["no_responses"])
         else:
             for response in responses:
                 await context.bot.send_message(
@@ -271,7 +271,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=TEXTS["psychologist_response"].format(response['response']),
                 )
         
-        await start(update, context)
+        # Возвращаем пользователя в текущее меню без дублирования
+        keyboard = [
+            [
+                InlineKeyboardButton("О сообществе", callback_data="about_community"),
+                InlineKeyboardButton("О психологе", callback_data="about_psychologist"),
+            ],
+            [
+                InlineKeyboardButton("Ответ психолога", callback_data="check_response"),
+                InlineKeyboardButton("Написать о проблеме", callback_data="write_problem"),
+            ],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text("Что вас интересует?", reply_markup=reply_markup)
     
     elif query.data == "back_to_main":
         await start(update, context)
@@ -298,7 +310,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Пожалуйста, отправьте только текст или видео-кружок.")
             return WAITING_FOR_MESSAGE
         
-        # Сохраняем пользователя и сообщение
         db.save_user(user.id)
         
         message_data = {
@@ -311,12 +322,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.save_message(message_data)
         
         await update.message.reply_text(TEXTS["message_sent"])
+        # Не возвращаем пользователя в главное меню
         
     except Exception as e:
         logger.error(f"Ошибка при обработке сообщения: {e}")
         await update.message.reply_text("Произошла ошибка при отправке сообщения. Пожалуйста, попробуйте позже.")
+        return WAITING_FOR_MESSAGE
     
-    await start(update, context)
     return ConversationHandler.END
 
 async def handle_psychologist_response(update: Update, context: ContextTypes.DEFAULT_TYPE):

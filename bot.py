@@ -23,11 +23,7 @@ load_dotenv()
 # Настройка логгирования
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-    handlers=[
-        logging.FileHandler('bot.log'),
-        logging.StreamHandler()
-    ]
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
@@ -77,34 +73,22 @@ TEXTS = {
 class Database:
     def __init__(self):
         self.conn = None
-        self.connection_attempts = 0
-        self.max_attempts = 3
         
     def connect(self):
-        """Устанавливает соединение с базой данных с повторными попытками"""
-        while self.connection_attempts < self.max_attempts:
-            try:
-                database_url = os.getenv('DATABASE_URL')
-                if not database_url:
-                    logger.error("DATABASE_URL не установлен")
-                    raise ValueError("DATABASE_URL не установлен")
+        """Устанавливает соединение с базой данных"""
+        try:
+            database_url = os.getenv('DATABASE_URL')
+            if not database_url:
+                logger.error("DATABASE_URL не установлен")
+                return False
                 
-                logger.info(f"Попытка подключения к БД (попытка {self.connection_attempts + 1})")
-                self.conn = psycopg2.connect(database_url)
-                logger.info("Успешное подключение к базе данных")
-                return
-                
-            except Exception as e:
-                self.connection_attempts += 1
-                logger.error(f"Ошибка подключения к базе данных (попытка {self.connection_attempts}): {e}")
-                
-                if self.connection_attempts < self.max_attempts:
-                    wait_time = 5 * self.connection_attempts
-                    logger.info(f"Повторная попытка через {wait_time} секунд...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error("Все попытки подключения к БД провалились")
-                    raise
+            self.conn = psycopg2.connect(database_url)
+            logger.info("Успешное подключение к базе данных")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка подключения к базе данных: {e}")
+            return False
 
     def init_db(self):
         """Инициализирует таблицы в базе данных"""
@@ -137,16 +121,17 @@ class Database:
                 
                 self.conn.commit()
                 logger.info("Таблицы успешно инициализированы")
+                return True
+                
         except Exception as e:
             logger.error(f"Ошибка инициализации базы данных: {e}")
             if self.conn:
                 self.conn.rollback()
-            raise
+            return False
 
     def save_user(self, user_id):
         """Сохраняет пользователя в базу данных"""
         if not self.conn:
-            logger.error("Нет подключения к БД для сохранения пользователя")
             return False
             
         try:
@@ -166,7 +151,6 @@ class Database:
     def save_message(self, message_data):
         """Сохраняет сообщение в базу данных"""
         if not self.conn:
-            logger.error("Нет подключения к БД для сохранения сообщения")
             return False
             
         try:
@@ -196,7 +180,6 @@ class Database:
     def get_pending_responses(self, user_id):
         """Получает непрочитанные ответы для пользователя"""
         if not self.conn:
-            logger.error("Нет подключения к БД для получения ответов")
             return []
             
         try:
@@ -231,7 +214,6 @@ class Database:
     def save_response(self, message_id, response_text, response_type=None):
         """Сохраняет ответ психолога"""
         if not self.conn:
-            logger.error("Нет подключения к БД для сохранения ответа")
             return None
             
         try:
@@ -263,12 +245,10 @@ class Database:
             return None
 
 # Глобальная переменная для базы данных
-db = None
+db = Database()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global db
-    
-    if not db or not db.conn:
+    if not db.conn:
         if update.message:
             await update.message.reply_text(TEXTS["db_error"])
         else:
@@ -293,12 +273,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(TEXTS["start"], reply_markup=reply_markup)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global db
-    
     query = update.callback_query
     await query.answer()
     
-    if not db or not db.conn:
+    if not db.conn:
         await query.edit_message_text(TEXTS["db_error"])
         return
     
@@ -367,9 +345,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start(update, context)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global db
-    
-    if not db or not db.conn:
+    if not db.conn:
         await update.message.reply_text(TEXTS["db_error"])
         return ConversationHandler.END
     
@@ -433,9 +409,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def handle_psychologist_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global db
-    
-    if not db or not db.conn:
+    if not db.conn:
         return
         
     if update.message.chat.id != PSYCHOLOGIST_GROUP_ID or not update.message.reply_to_message:
@@ -502,8 +476,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 def main():
-    global db
-    
+    # Проверяем обязательные переменные
     if not os.getenv('TELEGRAM_BOT_TOKEN'):
         logger.error("Не указан токен бота!")
         return
@@ -513,14 +486,12 @@ def main():
         return
     
     # Инициализация базы данных
-    try:
-        db = Database()
-        db.connect()
-        db.init_db()
-        logger.info("База данных успешно инициализирована")
-    except Exception as e:
-        logger.error(f"Критическая ошибка инициализации БД: {e}")
-        logger.info("Бот запускается в ограниченном режиме без БД")
+    if not db.connect():
+        logger.error("Не удалось подключиться к базе данных")
+        return
+        
+    if not db.init_db():
+        logger.error("Не удалось инициализировать базу данных")
         return
     
     try:
@@ -544,39 +515,17 @@ def main():
             )
         )
         
-        # Определяем, используем ли мы вебхуки или polling
-        webhook_url = os.getenv('WEBHOOK_URL')
-        render = os.environ.get('RENDER', False)
-        
-        if webhook_url and render:
-            # Используем вебхуки на Render
-            PORT = int(os.environ.get('PORT', 10000))
-            
-            # Устанавливаем вебхук
-            async def set_webhook(app):
-                await app.bot.set_webhook(webhook_url)
-            
-            application.run_webhook(
-                listen="0.0.0.0",
-                port=PORT,
-                webhook_url=webhook_url,
-                drop_pending_updates=True  # Важно: удаляем pending updates при старте
-            )
-            logger.info(f"Бот запущен с вебхуком на порту {PORT}")
-        else:
-            # Используем polling
-            application.run_polling(
-                drop_pending_updates=True,  # Важно: удаляем pending updates
-                allowed_updates=Update.ALL_TYPES
-            )
-            logger.info("Бот запущен с polling")
+        # Простой запуск с polling
+        logger.info("Бот запускается...")
+        application.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES
+        )
             
     except telegram.error.Conflict as e:
         logger.error(f"Бот уже запущен: {e}")
-        sys.exit(1)
     except Exception as e:
         logger.error(f"Ошибка запуска: {e}")
-        sys.exit(1)
 
 if __name__ == "__main__":
     main()

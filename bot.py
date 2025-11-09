@@ -14,6 +14,8 @@ from telegram.ext import (
 )
 from dotenv import load_dotenv
 import telegram.error
+import time
+import sys
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -68,21 +70,41 @@ TEXTS = {
     "psychologist_response": "📩 Вы получили ответ от психолога:\n\n{}",
     "psychologist_video_response": "📹 Психолог отправил вам видео-ответ",
     "psychologist_voice_response": "🎤 Психолог отправил вам голосовое сообщение",
-    "unsupported_format": "❌ Пожалуйста, отправьте только текст, видео-кружок или голосовое сообщение."
+    "unsupported_format": "❌ Пожалуйста, отправьте только текст, видео-кружок или голосовое сообщение.",
+    "db_error": "❌ Временные технические неполадки. Пожалуйста, попробуйте позже."
 }
 
 class Database:
     def __init__(self):
         self.conn = None
+        self.connection_attempts = 0
+        self.max_attempts = 3
         
     def connect(self):
-        """Устанавливает соединение с базой данных"""
-        try:
-            self.conn = psycopg2.connect(os.getenv('DATABASE_URL'))
-            logger.info("Успешное подключение к базе данных")
-        except Exception as e:
-            logger.error(f"Ошибка подключения к базе данных: {e}")
-            raise
+        """Устанавливает соединение с базой данных с повторными попытками"""
+        while self.connection_attempts < self.max_attempts:
+            try:
+                database_url = os.getenv('DATABASE_URL')
+                if not database_url:
+                    logger.error("DATABASE_URL не установлен")
+                    raise ValueError("DATABASE_URL не установлен")
+                
+                logger.info(f"Попытка подключения к БД (попытка {self.connection_attempts + 1})")
+                self.conn = psycopg2.connect(database_url)
+                logger.info("Успешное подключение к базе данных")
+                return
+                
+            except Exception as e:
+                self.connection_attempts += 1
+                logger.error(f"Ошибка подключения к базе данных (попытка {self.connection_attempts}): {e}")
+                
+                if self.connection_attempts < self.max_attempts:
+                    wait_time = 5 * self.connection_attempts
+                    logger.info(f"Повторная попытка через {wait_time} секунд...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error("Все попытки подключения к БД провалились")
+                    raise
 
     def init_db(self):
         """Инициализирует таблицы в базе данных"""
@@ -113,29 +135,20 @@ class Database:
                 )
                 """)
                 
-                # Добавляем колонку response_type, если она не существует
-                cur.execute("""
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 
-                        FROM information_schema.columns 
-                        WHERE table_name='messages' AND column_name='response_type'
-                    ) THEN
-                        ALTER TABLE messages ADD COLUMN response_type TEXT;
-                    END IF;
-                END $$;
-                """)
-                
                 self.conn.commit()
                 logger.info("Таблицы успешно инициализированы")
         except Exception as e:
             logger.error(f"Ошибка инициализации базы данных: {e}")
-            self.conn.rollback()
+            if self.conn:
+                self.conn.rollback()
             raise
 
     def save_user(self, user_id):
         """Сохраняет пользователя в базу данных"""
+        if not self.conn:
+            logger.error("Нет подключения к БД для сохранения пользователя")
+            return False
+            
         try:
             with self.conn.cursor() as cur:
                 cur.execute(
@@ -143,13 +156,19 @@ class Database:
                     (user_id,)
                 )
                 self.conn.commit()
+                return True
         except Exception as e:
             logger.error(f"Ошибка сохранения пользователя: {e}")
-            self.conn.rollback()
-            raise
+            if self.conn:
+                self.conn.rollback()
+            return False
 
     def save_message(self, message_data):
         """Сохраняет сообщение в базу данных"""
+        if not self.conn:
+            logger.error("Нет подключения к БД для сохранения сообщения")
+            return False
+            
         try:
             with self.conn.cursor() as cur:
                 cur.execute(
@@ -167,13 +186,19 @@ class Database:
                     )
                 )
                 self.conn.commit()
+                return True
         except Exception as e:
             logger.error(f"Ошибка сохранения сообщения: {e}")
-            self.conn.rollback()
-            raise
+            if self.conn:
+                self.conn.rollback()
+            return False
 
     def get_pending_responses(self, user_id):
         """Получает непрочитанные ответы для пользователя"""
+        if not self.conn:
+            logger.error("Нет подключения к БД для получения ответов")
+            return []
+            
         try:
             with self.conn.cursor(cursor_factory=DictCursor) as cur:
                 cur.execute(
@@ -199,11 +224,16 @@ class Database:
                 return responses
         except Exception as e:
             logger.error(f"Ошибка получения ответов: {e}")
-            self.conn.rollback()
+            if self.conn:
+                self.conn.rollback()
             return []
 
     def save_response(self, message_id, response_text, response_type=None):
         """Сохраняет ответ психолога"""
+        if not self.conn:
+            logger.error("Нет подключения к БД для сохранения ответа")
+            return None
+            
         try:
             with self.conn.cursor() as cur:
                 cur.execute(
@@ -228,15 +258,23 @@ class Database:
                 return user_id
         except Exception as e:
             logger.error(f"Ошибка сохранения ответа: {e}")
-            self.conn.rollback()
+            if self.conn:
+                self.conn.rollback()
             return None
 
-# Инициализация базы данных
-db = Database()
-db.connect()
-db.init_db()
+# Глобальная переменная для базы данных
+db = None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global db
+    
+    if not db or not db.conn:
+        if update.message:
+            await update.message.reply_text(TEXTS["db_error"])
+        else:
+            await update.callback_query.edit_message_text(TEXTS["db_error"])
+        return
+    
     keyboard = [
         [
             InlineKeyboardButton("О сообществе", callback_data="about_community"),
@@ -255,8 +293,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(TEXTS["start"], reply_markup=reply_markup)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global db
+    
     query = update.callback_query
     await query.answer()
+    
+    if not db or not db.conn:
+        await query.edit_message_text(TEXTS["db_error"])
+        return
     
     if query.data == "about_community":
         keyboard = [[InlineKeyboardButton("Назад", callback_data="back_to_main")]]
@@ -323,11 +367,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start(update, context)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global db
+    
+    if not db or not db.conn:
+        await update.message.reply_text(TEXTS["db_error"])
+        return ConversationHandler.END
+    
     user = update.message.from_user
     
     try:
         if update.message.video_note:
-            # Обработка видео-кружков
             sent_message = await context.bot.send_video_note(
                 chat_id=PSYCHOLOGIST_GROUP_ID,
                 video_note=update.message.video_note.file_id,
@@ -336,7 +385,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = None
         
         elif update.message.voice:
-            # Обработка голосовых сообщений
             sent_message = await context.bot.send_voice(
                 chat_id=PSYCHOLOGIST_GROUP_ID,
                 voice=update.message.voice.file_id,
@@ -346,7 +394,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = None
         
         elif update.message.text:
-            # Обработка текстовых сообщений
             sent_message = await context.bot.send_message(
                 chat_id=PSYCHOLOGIST_GROUP_ID,
                 text=f"Анонимное сообщение:\n\n{update.message.text}",
@@ -355,12 +402,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = update.message.text
         
         else:
-            # Неподдерживаемый формат
             await update.message.reply_text(TEXTS["unsupported_format"])
             return WAITING_FOR_MESSAGE
         
-        # Сохраняем пользователя и сообщение в БД
-        db.save_user(user.id)
+        if not db.save_user(user.id):
+            await update.message.reply_text(TEXTS["db_error"])
+            return ConversationHandler.END
+            
         message_data = {
             'message_id': str(sent_message.message_id),
             'user_id': user.id,
@@ -368,7 +416,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'message_type': message_type,
             'text': text
         }
-        db.save_message(message_data)
+        
+        if not db.save_message(message_data):
+            await update.message.reply_text(TEXTS["db_error"])
+            return ConversationHandler.END
         
         keyboard = [[InlineKeyboardButton("В меню", callback_data="back_to_main")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -382,6 +433,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def handle_psychologist_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global db
+    
+    if not db or not db.conn:
+        return
+        
     if update.message.chat.id != PSYCHOLOGIST_GROUP_ID or not update.message.reply_to_message:
         return
     
@@ -389,7 +445,6 @@ async def handle_psychologist_response(update: Update, context: ContextTypes.DEF
     
     try:
         if update.message.video_note:
-            # Обработка видео-ответов
             user_id = db.save_response(
                 replied_message_id, 
                 update.message.video_note.file_id,
@@ -409,7 +464,6 @@ async def handle_psychologist_response(update: Update, context: ContextTypes.DEF
                     logger.error(f"Не удалось отправить видео-ответ пользователю {user_id}: {e}")
         
         elif update.message.voice:
-            # Обработка голосовых ответов
             user_id = db.save_response(
                 replied_message_id, 
                 update.message.voice.file_id,
@@ -429,7 +483,6 @@ async def handle_psychologist_response(update: Update, context: ContextTypes.DEF
                     logger.error(f"Не удалось отправить голосовое сообщение пользователю {user_id}: {e}")
         
         else:
-            # Обработка текстовых ответов
             response_text = update.message.text or update.message.caption or "Психолог отправил медиа-сообщение"
             user_id = db.save_response(replied_message_id, response_text)
             if user_id:
@@ -449,12 +502,25 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 def main():
+    global db
+    
     if not os.getenv('TELEGRAM_BOT_TOKEN'):
         logger.error("Не указан токен бота!")
         return
     
     if not os.getenv('DATABASE_URL'):
         logger.error("Не указана строка подключения к БД!")
+        return
+    
+    # Инициализация базы данных
+    try:
+        db = Database()
+        db.connect()
+        db.init_db()
+        logger.info("База данных успешно инициализирована")
+    except Exception as e:
+        logger.error(f"Критическая ошибка инициализации БД: {e}")
+        logger.info("Бот запускается в ограниченном режиме без БД")
         return
     
     try:
@@ -478,20 +544,39 @@ def main():
             )
         )
         
-        if os.getenv('WEBHOOK_URL'):
-            PORT = int(os.environ.get('PORT', 5000))
+        # Определяем, используем ли мы вебхуки или polling
+        webhook_url = os.getenv('WEBHOOK_URL')
+        render = os.environ.get('RENDER', False)
+        
+        if webhook_url and render:
+            # Используем вебхуки на Render
+            PORT = int(os.environ.get('PORT', 10000))
+            
+            # Устанавливаем вебхук
+            async def set_webhook(app):
+                await app.bot.set_webhook(webhook_url)
+            
             application.run_webhook(
                 listen="0.0.0.0",
                 port=PORT,
-                webhook_url=os.getenv('WEBHOOK_URL')
+                webhook_url=webhook_url,
+                drop_pending_updates=True  # Важно: удаляем pending updates при старте
             )
+            logger.info(f"Бот запущен с вебхуком на порту {PORT}")
         else:
-            application.run_polling()
+            # Используем polling
+            application.run_polling(
+                drop_pending_updates=True,  # Важно: удаляем pending updates
+                allowed_updates=Update.ALL_TYPES
+            )
+            logger.info("Бот запущен с polling")
             
     except telegram.error.Conflict as e:
         logger.error(f"Бот уже запущен: {e}")
+        sys.exit(1)
     except Exception as e:
         logger.error(f"Ошибка запуска: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

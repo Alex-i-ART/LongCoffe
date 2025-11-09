@@ -55,7 +55,7 @@ TEXTS = {
     ),
     "write_problem": (
         "✍️ *Написать о проблеме*\n\n"
-        "Напишите ваше сообщение или отправьте видео-кружок, "
+        "Напишите ваше сообщение, отправьте видео-кружок или голосовое сообщение, "
         "и оно будет анонимно переправлено психологу. "
         "Психолог ответит вам в ближайшее время."
     ),
@@ -66,7 +66,9 @@ TEXTS = {
     ),
     "no_responses": "Пока нет ответов от психолога.",
     "psychologist_response": "📩 Вы получили ответ от психолога:\n\n{}",
-    "psychologist_video_response": "📹 Психолог отправил вам видео-ответ"
+    "psychologist_video_response": "📹 Психолог отправил вам видео-ответ",
+    "psychologist_voice_response": "🎤 Психолог отправил вам голосовое сообщение",
+    "unsupported_format": "❌ Пожалуйста, отправьте только текст, видео-кружок или голосовое сообщение."
 }
 
 class Database:
@@ -178,7 +180,7 @@ class Database:
                     """
                     SELECT message_id, response, response_type 
                     FROM messages 
-                    WHERE user_id = %s AND (response IS NOT NULL OR response_type = 'video_note') AND answered = FALSE
+                    WHERE user_id = %s AND (response IS NOT NULL OR response_type IN ('video_note', 'voice')) AND answered = FALSE
                     ORDER BY created_at
                     """,
                     (user_id,)
@@ -289,6 +291,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=user_id,
                         text=TEXTS["psychologist_video_response"]
                     )
+                elif response['response_type'] == 'voice':
+                    await context.bot.send_voice(
+                        chat_id=user_id,
+                        voice=response['response']
+                    )
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=TEXTS["psychologist_voice_response"]
+                    )
                 else:
                     await context.bot.send_message(
                         chat_id=user_id,
@@ -316,23 +327,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         if update.message.video_note:
+            # Обработка видео-кружков
             sent_message = await context.bot.send_video_note(
                 chat_id=PSYCHOLOGIST_GROUP_ID,
                 video_note=update.message.video_note.file_id,
             )
             message_type = "video_note"
             text = None
+        
+        elif update.message.voice:
+            # Обработка голосовых сообщений
+            sent_message = await context.bot.send_voice(
+                chat_id=PSYCHOLOGIST_GROUP_ID,
+                voice=update.message.voice.file_id,
+                caption="Анонимное голосовое сообщение"
+            )
+            message_type = "voice"
+            text = None
+        
         elif update.message.text:
+            # Обработка текстовых сообщений
             sent_message = await context.bot.send_message(
                 chat_id=PSYCHOLOGIST_GROUP_ID,
                 text=f"Анонимное сообщение:\n\n{update.message.text}",
             )
             message_type = "text"
             text = update.message.text
+        
         else:
-            await update.message.reply_text("Пожалуйста, отправьте только текст или видео-кружок.")
+            # Неподдерживаемый формат
+            await update.message.reply_text(TEXTS["unsupported_format"])
             return WAITING_FOR_MESSAGE
         
+        # Сохраняем пользователя и сообщение в БД
         db.save_user(user.id)
         message_data = {
             'message_id': str(sent_message.message_id),
@@ -360,35 +387,62 @@ async def handle_psychologist_response(update: Update, context: ContextTypes.DEF
     
     replied_message_id = str(update.message.reply_to_message.message_id)
     
-    if update.message.video_note:
-        user_id = db.save_response(
-            replied_message_id, 
-            update.message.video_note.file_id,
-            response_type="video_note"
-        )
-        if user_id:
-            try:
-                await context.bot.send_video_note(
-                    chat_id=user_id,
-                    video_note=update.message.video_note.file_id
-                )
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=TEXTS["psychologist_video_response"]
-                )
-            except Exception as e:
-                logger.error(f"Не удалось отправить видео-ответ пользователю {user_id}: {e}")
-    else:
-        response_text = update.message.text or update.message.caption or "Психолог отправил медиа-сообщение"
-        user_id = db.save_response(replied_message_id, response_text)
-        if user_id:
-            try:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=TEXTS["psychologist_response"].format(response_text),
-                )
-            except Exception as e:
-                logger.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
+    try:
+        if update.message.video_note:
+            # Обработка видео-ответов
+            user_id = db.save_response(
+                replied_message_id, 
+                update.message.video_note.file_id,
+                response_type="video_note"
+            )
+            if user_id:
+                try:
+                    await context.bot.send_video_note(
+                        chat_id=user_id,
+                        video_note=update.message.video_note.file_id
+                    )
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=TEXTS["psychologist_video_response"]
+                    )
+                except Exception as e:
+                    logger.error(f"Не удалось отправить видео-ответ пользователю {user_id}: {e}")
+        
+        elif update.message.voice:
+            # Обработка голосовых ответов
+            user_id = db.save_response(
+                replied_message_id, 
+                update.message.voice.file_id,
+                response_type="voice"
+            )
+            if user_id:
+                try:
+                    await context.bot.send_voice(
+                        chat_id=user_id,
+                        voice=update.message.voice.file_id
+                    )
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=TEXTS["psychologist_voice_response"]
+                    )
+                except Exception as e:
+                    logger.error(f"Не удалось отправить голосовое сообщение пользователю {user_id}: {e}")
+        
+        else:
+            # Обработка текстовых ответов
+            response_text = update.message.text or update.message.caption or "Психолог отправил медиа-сообщение"
+            user_id = db.save_response(replied_message_id, response_text)
+            if user_id:
+                try:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=TEXTS["psychologist_response"].format(response_text),
+                    )
+                except Exception as e:
+                    logger.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
+    
+    except Exception as e:
+        logger.error(f"Ошибка при обработке ответа психолога: {e}")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
@@ -410,7 +464,7 @@ def main():
             entry_points=[CommandHandler("start", start), CallbackQueryHandler(button_handler)],
             states={
                 WAITING_FOR_MESSAGE: [
-                    MessageHandler(filters.TEXT | filters.VIDEO_NOTE, handle_message)
+                    MessageHandler(filters.TEXT | filters.VIDEO_NOTE | filters.VOICE, handle_message)
                 ],
             },
             fallbacks=[CallbackQueryHandler(cancel, pattern="back_to_main")],
@@ -419,7 +473,7 @@ def main():
         application.add_handler(conv_handler)
         application.add_handler(
             MessageHandler(
-                (filters.TEXT | filters.VIDEO_NOTE) & ~filters.COMMAND & filters.Chat(PSYCHOLOGIST_GROUP_ID),
+                (filters.TEXT | filters.VIDEO_NOTE | filters.VOICE) & ~filters.COMMAND & filters.Chat(PSYCHOLOGIST_GROUP_ID),
                 handle_psychologist_response
             )
         )

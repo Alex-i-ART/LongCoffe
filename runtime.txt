@@ -1,4 +1,1 @@
-[file name]: runtime.txt
-[file content begin]
 python-3.11.8
-[file content end]

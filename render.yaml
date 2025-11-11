@@ -1,5 +1,3 @@
-[file name]: render.yaml
-[file content begin]
 services:
   - type: web
     name: telegram-psychologist-bot
@@ -14,4 +12,3 @@ services:
         fromDatabase:
           name: psychologist_bot_db
           property: connectionString
-[file content end]

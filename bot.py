@@ -1,7 +1,7 @@
 import logging
 import os
-import psycopg2
-from psycopg2.extras import DictCursor
+import psycopg
+from psycopg.rows import dict_row
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -84,7 +84,7 @@ class Database:
                 logger.error("DATABASE_URL не установлен")
                 return False
                 
-            self.conn = psycopg2.connect(database_url)
+            self.conn = psycopg.connect(database_url)
             logger.info("Успешное подключение к базе данных")
             return True
             
@@ -185,7 +185,7 @@ class Database:
             return []
             
         try:
-            with self.conn.cursor(cursor_factory=DictCursor) as cur:
+            with self.conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
                     """
                     SELECT message_id, response, response_type 

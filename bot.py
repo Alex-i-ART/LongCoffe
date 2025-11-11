@@ -17,6 +17,8 @@ import telegram.error
 import time
 import sys
 
+PORT = int(os.environ.get('PORT', 5000))
+
 # Загрузка переменных окружения
 load_dotenv()
 
@@ -515,16 +517,17 @@ def main():
             )
         )
         
-        # Простой запуск с polling
-        logger.info("Бот запускается...")
-        application.run_polling(
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES
+        # Запуск для Render
+        logger.info("Бот запускается на Render...")
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=os.getenv('TELEGRAM_BOT_TOKEN'),
+            webhook_url=f"https://{os.getenv('RENDER_SERVICE_NAME')}.onrender.com/{os.getenv('TELEGRAM_BOT_TOKEN')}"
         )
             
-    except telegram.error.Conflict as e:
-        logger.error(f"Бот уже запущен: {e}")
     except Exception as e:
+        logger.error(f"Ошибка запуска: {e}")
         logger.error(f"Ошибка запуска: {e}")
 
 if __name__ == "__main__":

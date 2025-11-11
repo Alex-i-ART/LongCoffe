@@ -1,0 +1,17 @@
+[file name]: render.yaml
+[file content begin]
+services:
+  - type: web
+    name: telegram-psychologist-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: psychologist_bot_db
+          property: connectionString
+[file content end]
